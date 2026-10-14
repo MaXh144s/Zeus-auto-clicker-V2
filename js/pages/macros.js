@@ -386,13 +386,19 @@ function validateCpsRange() {
   return true;
 }
 
+function parseDecimalInput(value) {
+  // O WebView segue a localidade do Windows; portanto aceita tanto 0.5
+  // quanto 0,5, mas o valor enviado ao C# permanece um número JSON válido.
+  return parseFloat(String(value).trim().replace(',', '.'));
+}
+
 function validateCpsStepField(el) {
-  let v = parseFloat(el.value);
-  if (isNaN(v) || v <= 0) { el.value = '1.0'; return; }
+  let v = parseDecimalInput(el.value);
+  if (isNaN(v) || v <= 0) { el.value = '1.0'; return true; }
   v = Math.round(v * 10) / 10;
-  if (v < 0.1) { el.value = '0.1'; return; }
-  if (v > 10)  { el.value = '10.0'; return; }
-  el.value = v;
+  v = Math.max(0.1, Math.min(10, v));
+  el.value = v.toFixed(1);
+  return true;
 }
 
 // ============================================================
@@ -419,6 +425,8 @@ function syncIntervalSlider() {
 function saveMacroKey() {
   if (!state.editingKey) return;
   if (state.options.humanize && !validateCpsRange()) { showToast('Corrija o range de CPS antes de salvar.', 'error'); return; }
+  const cpsStepEl = document.getElementById('cfg-cps-step');
+  validateCpsStepField(cpsStepEl);
   if (state.options.shortcuts) {
     const pp = state.macroShortcuts['cps-plus'];
     const pm = state.macroShortcuts['cps-minus'];
@@ -432,7 +440,7 @@ function saveMacroKey() {
     humanize: state.options.humanize,
     cpsMin: Math.round(parseFloat(document.getElementById('cfg-cps-min').value) * 10) / 10,
     cpsMax: Math.round(parseFloat(document.getElementById('cfg-cps-max').value) * 10) / 10,
-    cpsStep: Math.round(parseFloat(document.getElementById('cfg-cps-step').value) * 10) / 10 || 1,
+    cpsStep: parseDecimalInput(cpsStepEl.value),
     shortcuts: state.options.shortcuts,
     cpsPlus: [...state.macroShortcuts['cps-plus']],
     cpsMinus: [...state.macroShortcuts['cps-minus']],

@@ -17,6 +17,13 @@ public sealed class MacroConfig
 
     public int IntervalMs { get; set; }
 
+    /// <summary>
+    /// CPS-alvo com precisão decimal. Quando informado, a engine usa este valor
+    /// para calcular o intervalo em ticks sem arredondá-lo para milissegundos.
+    /// <see cref="IntervalMs"/> permanece como fallback para perfis legados.
+    /// </summary>
+    public double CpsBase { get; set; }
+
     public bool RandomizationEnabled { get; set; }
 
     public int RandomMin { get; set; }

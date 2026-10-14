@@ -3,8 +3,30 @@
 <ItemGroup>
     <Content Include="assets\ZeusAuto.ico">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
 </ItemGroup>
+
+  <!-- A interface WebView2 fica na raiz do repositório, fora do projeto App.
+       Copie-a para a mesma estrutura relativa ao executável em build e publish. -->
+  <ItemGroup>
+    <Content Include="..\ZeusAuto.html" Link="ZeusAuto.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\css\**\*" Link="css\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\js\**\*" Link="js\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\img\**\*" Link="img\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\ZeusAuto.Engine\ZeusAuto.Engine.csproj" />

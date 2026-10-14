@@ -19,10 +19,10 @@ namespace ZeusAuto.Engine.Core;
 //     → scheduler Windows a 1 ms; spin-wait residual cobre só ~0.5 ms
 //     → reduz uso de CPU ~80% vs. spin-wait puro
 //
-//  4. DispatchClick: PressButton no loop + ReleaseButton via timer separado
-//     → DOWN e UP com timestamps distintos (aceito por jogos/anticheat)
-//     → ClickHoldMs configurável (padrão 10 ms, recomendado 8–12 ms)
-//     → loop principal nunca bloqueado
+//  4. DOWN e UP são agendados pela própria thread do macro
+//     → não cria uma tarefa do ThreadPool por clique
+//     → ClickHoldMs configurável (padrão 10 ms)
+//     → cada macro tem custo previsível, inclusive com vários macros ativos
 //
 //  5. Random por instância — sem lock do Random.Shared em paralelo
 //
@@ -37,9 +37,8 @@ namespace ZeusAuto.Engine.Core;
 //  FIX-1: Beep movido para antes de Thread.Start() — elimina falsa sensação
 //          de ativação quando o loop ainda não começou a rodar.
 //
-//  FIX-2: Debounce de InputUp após StartMacro — impede que o InputUp do
-//          segundo clique (double-click rápido) cancele o loop antes da
-//          primeira iteração. Guard de LoopStartDebounceMs (padrão 80 ms).
+//  FIX-2: o MouseUp do segundo clique cancela o loop imediatamente; a espera
+//          do loop é sinalizável, portanto não fica presa em Sleep/hold.
 //
 //  FIX-3: Volatile.Write(ref _loopCancelled, false) — barreira de memória
 //          correta ao resetar o flag; evita que thread veja valor residual
@@ -64,11 +63,6 @@ public sealed class MacroEngine : IDisposable
 
     private const uint TimerResolutionMs = 1;   // reduz quantum do scheduler para 1 ms
     private const int  BeepDurationMs    = 80;
-
-    // FIX-2: janela de debounce após StartMacro durante a qual InputUp é ignorado.
-    // 80 ms cobre o tempo de escalonamento da thread + hold mínimo intencional.
-    // Ajuste se o seu double-click window for menor que este valor.
-    private const int LoopStartDebounceMs = 80;
 
     // FIX-4: tempo máximo de espera pela thread anterior antes de desistir.
     private const int LoopJoinTimeoutMs = 50;
@@ -112,14 +106,13 @@ public sealed class MacroEngine : IDisposable
 
     // ── Loop de clique ────────────────────────────────────────────────────────
     private Thread?       _loopThread;
+    // Acorda imediatamente a thread do loop quando o usuário solta o gatilho.
+    // Evita que um Thread.Sleep atrasado mantenha o macro ativo após o MouseUp.
+    private readonly ManualResetEventSlim _loopWake = new(false);
     // Não usar volatile aqui — Volatile.Write/Read são usados em todos os acessos,
     // que fornecem as mesmas barreiras de memória sem o aviso CS0420
     // ("reference to volatile field will not be treated as volatile").
     private bool _loopCancelled;
-
-    // FIX-2: timestamp de quando StartMacro foi chamado, usado pelo debounce de InputUp.
-    // Protegido por _sync — escrito apenas em StartMacro, lido apenas em HandleInputUp.
-    private DateTimeOffset _loopRequestedAt;
 
     // ── Random por instância: sem contenção com Random.Shared ────────────────
     private readonly Random _rng = new();
@@ -241,9 +234,7 @@ public sealed class MacroEngine : IDisposable
             // o flag. Sem isso, em arquiteturas ARM a thread nova pode ler o valor
             // residual true de uma execução anterior e sair imediatamente.
             Volatile.Write(ref _loopCancelled, false);
-
-            // FIX-2: registra o momento exato do start para o debounce de InputUp.
-            _loopRequestedAt = DateTimeOffset.UtcNow;
+            _loopWake.Reset();
 
             // FIX-1: beep emitido ANTES de Thread.Start(), enquanto ainda estamos
             // dentro do lock com _state = Running confirmado. Isso garante que o
@@ -326,15 +317,10 @@ public sealed class MacroEngine : IDisposable
 
             if (_state == MacroState.Running)
             {
-                // FIX-2: debounce — ignora InputUp que chegue dentro de LoopStartDebounceMs
-                // após o StartMacro. Isso evita que o InputUp do segundo clique de um
-                // double-click rápido cancele o loop antes da primeira iteração ser executada,
-                // que era o principal responsável pelo sintoma "bipa mas não clica".
-                bool withinDebounce =
-                    (DateTimeOffset.UtcNow - _loopRequestedAt).TotalMilliseconds < LoopStartDebounceMs;
-
-                if (!withinDebounce)
-                    shouldStop = true;
+                // O segundo clique só mantém o macro ativo enquanto permanece pressionado.
+                // Portanto, qualquer MouseUp do gatilho após a ativação deve cancelar
+                // imediatamente, inclusive se ocorrer poucos milissegundos após o MouseDown.
+                shouldStop = true;
             }
         }
 
@@ -413,8 +399,8 @@ public sealed class MacroEngine : IDisposable
             DispatchClick(cfg);
 
             // ── Calcula o intervalo deste ciclo ───────────────────────────────
-            int delayMs  = CalculateDelay(cfg);
-            nextTick    += (long)(delayMs * freq / 1000.0);
+            double delayMs = CalculateDelay(cfg);
+            nextTick += (long)(delayMs * freq / 1000.0);
 
             // ── Aguarda o próximo tick ────────────────────────────────────────
             long remaining = nextTick - sw.ElapsedTicks;
@@ -426,7 +412,7 @@ public sealed class MacroEngine : IDisposable
                 // O spin-wait fino cobre o resíduo com precisão de ~0.5 ms.
                 // Com timeBeginPeriod(1) ativo, Sleep(n) dorme ~n ms (não ~15 ms).
                 if (sleepMs >= 2)
-                    Thread.Sleep(sleepMs - 1);
+                    _loopWake.Wait(sleepMs - 1);
 
                 // Spin-wait final: preciso ao tick, sem overhead de kernel
                 while (sw.ElapsedTicks < nextTick && !Volatile.Read(ref _loopCancelled))
@@ -443,9 +429,8 @@ public sealed class MacroEngine : IDisposable
     // ── Clique com hold real ──────────────────────────────────────────────────
 
     /// <summary>
-    /// Envia DOWN imediatamente no loop e agenda UP em thread de pool separada.
-    /// Garante que DOWN e UP tenham timestamps distintos — jogos e anticheat
-    /// (EAC, BattlEye) rejeitam cliques onde dwTime de down == dwTime de up.
+    /// Emite DOWN e UP na mesma thread dedicada do macro, mantendo o hold
+    /// configurado sem criar trabalho adicional no ThreadPool.
     /// </summary>
     private void DispatchClick(MacroConfig cfg)
     {
@@ -467,32 +452,35 @@ public sealed class MacroEngine : IDisposable
         if (cfg.ClickHoldRandomize)
             holdMs = Math.Max(1, holdMs + _rng.Next(-2, 3));
 
-        // DOWN disparado imediatamente — não bloqueia o loop
+        // DOWN e UP são emitidos pela própria thread dedicada do macro. Isso evita
+        // criar um work item e um spin-wait no ThreadPool para cada clique.
         PressButton(button);
-
-        // UP agendado em thread de pool após holdMs via spin-wait fino.
-        // UnsafeQueueUserWorkItem evita a captura do ExecutionContext (menor overhead).
-        // O spin-wait aqui é intencional: holdMs é curto (8–20 ms) e precisa de
-        // precisão que Thread.Sleep sem timeBeginPeriod não garantiria.
-        int    capturedHold   = holdMs;
-        string capturedButton = button;
-        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        try
         {
-            SpinWaitMs(capturedHold);
-            ReleaseButton(capturedButton);
-        }, null);
+            WaitHoldOrCancellation(holdMs);
+        }
+        finally
+        {
+            // Mesmo quando o usuário solta o gatilho durante o hold, o DOWN já
+            // enviado recebe seu UP antes de o loop terminar.
+            ReleaseButton(button);
+        }
     }
 
     /// <summary>
-    /// Spin-wait de alta precisão. Usado apenas para o release do clique (holdMs curto).
-    /// Não usa Thread.Sleep para garantir precisão independente do estado do timeBeginPeriod
-    /// na thread de pool (que pode ser diferente da thread do loop).
+    /// Espera o hold com cancelamento imediato e usa spin apenas no resíduo final.
     /// </summary>
-    private static void SpinWaitMs(int ms)
+    private void WaitHoldOrCancellation(int ms)
     {
-        long freq   = Stopwatch.Frequency;
+        long freq = Stopwatch.Frequency;
         long target = Stopwatch.GetTimestamp() + (long)(ms * freq / 1000.0);
-        while (Stopwatch.GetTimestamp() < target)
+
+        // Libera a CPU durante quase todo o hold, mas pode ser interrompido por
+        // StopLoop imediatamente. O spin fica restrito ao resíduo submilissegundo.
+        if (ms >= 2 && _loopWake.Wait(ms - 1))
+            return;
+
+        while (Stopwatch.GetTimestamp() < target && !Volatile.Read(ref _loopCancelled))
             Thread.SpinWait(20);
     }
 
@@ -527,6 +515,7 @@ public sealed class MacroEngine : IDisposable
         // Sinaliza o spin-wait interno imediatamente via volatile bool —
         // mais rápido que CancellationToken, sem alocação.
         Volatile.Write(ref _loopCancelled, true);
+        _loopWake.Set();
         lock (_sync)
         {
             _state                = MacroState.Idle;
@@ -537,9 +526,13 @@ public sealed class MacroEngine : IDisposable
         // está aguardando no spin-wait. O Join necessário está em StartMacro (FIX-4).
     }
 
-    private int CalculateDelay(MacroConfig cfg)
+    private double CalculateDelay(MacroConfig cfg)
     {
-        int interval = Math.Max(1, cfg.IntervalMs);
+        // Mantém a fração do intervalo em ticks: 14 CPS = 71,428... ms, não 71 ms.
+        // Isso preserva tanto o CPS efetivo quanto incrementos como 13,5 + 0,5.
+        double interval = cfg.CpsBase > 0 && double.IsFinite(cfg.CpsBase)
+            ? 1000.0 / cfg.CpsBase
+            : Math.Max(1, cfg.IntervalMs);
         if (!cfg.RandomizationEnabled) return interval;
 
         int maxOffset = Math.Max(0, cfg.RandomMax);
@@ -752,8 +745,10 @@ public sealed class MacroEngine : IDisposable
         {
             if (double.IsNaN(_cpsAccumulated))
             {
-                _cpsAccumulated = current.IntervalMs > 0
-                    ? 1000.0 / current.IntervalMs
+                _cpsAccumulated = current.CpsBase > 0 && double.IsFinite(current.CpsBase)
+                    ? current.CpsBase
+                    : current.IntervalMs > 0
+                        ? 1000.0 / current.IntervalMs
                     : 10.0;
             }
             _cpsAccumulated = Math.Clamp(_cpsAccumulated + direction * step, CpsMin, CpsMax);
@@ -772,6 +767,7 @@ public sealed class MacroEngine : IDisposable
             ClickButton          = current.ClickButton,
             ActivationMode       = current.ActivationMode,
             IntervalMs           = newInterval,
+            CpsBase              = baseCps,
             RandomizationEnabled = current.RandomizationEnabled,
             RandomMin            = current.RandomMin,
             RandomMax            = current.RandomMax,

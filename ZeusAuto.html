@@ -185,7 +185,7 @@
               <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
                 <div class="form-label" style="margin-bottom:6px">Passo por atalho <span style="color:var(--text-muted);font-size:10px">(quanto o CPS sobe/desce a cada pressão)</span></div>
                 <div class="num-input-wrap">
-                  <input type="number" class="num-input" id="cfg-cps-step" min="0.1" max="10" step="0.1" value="1.0" onchange="validateCpsStepField(this)" oninput="validateCpsStepField(this)" style="width:80px">
+                  <input type="text" inputmode="decimal" class="num-input" id="cfg-cps-step" value="1.0" onchange="validateCpsStepField(this)" onblur="validateCpsStepField(this)" style="width:80px">
                   <div class="num-input-unit">cps</div>
                 </div>
                 <div class="num-input-hint">Ex: 0.5 → cada pressão de CPS+ ou CPS− ajusta 0.5 cps</div>

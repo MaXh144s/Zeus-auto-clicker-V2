@@ -141,7 +141,9 @@ internal sealed class EngineSlot : IDisposable
 
     /// <summary>CPS configurado atual (derivado do IntervalMs da config).</summary>
     public double ConfigCps =>
-        _engine.CurrentConfig.IntervalMs > 0
+        _engine.CurrentConfig.CpsBase > 0 && double.IsFinite(_engine.CurrentConfig.CpsBase)
+            ? _engine.CurrentConfig.CpsBase
+            : _engine.CurrentConfig.IntervalMs > 0
             ? 1000.0 / _engine.CurrentConfig.IntervalMs
             : 0.0;
 

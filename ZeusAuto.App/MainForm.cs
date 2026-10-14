@@ -124,6 +124,17 @@ public sealed class MainForm : Form
         if (!File.Exists(htmlPath))
             htmlPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "ZeusAuto.html"));
 
+        if (!File.Exists(htmlPath))
+        {
+            MessageBox.Show(
+                "Não foi possível localizar ZeusAuto.html ao lado do executável.",
+                "Arquivos da interface ausentes",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            Close();
+            return;
+        }
+
         _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
     }
 
@@ -422,14 +433,18 @@ public sealed class MainForm : Form
     {
         string triggerButton = NormalizeMouseButton(buttonKey);
 
-        int clickIntervalMs;
+        double targetCps;
         if (macro.Humanize)
         {
-            double avgCps = (macro.CpsMin + macro.CpsMax) / 2.0;
-            clickIntervalMs = avgCps > 0 ? (int)(1000.0 / avgCps) : 100;
+            targetCps = (macro.CpsMin + macro.CpsMax) / 2.0;
         }
         else
-            clickIntervalMs = macro.CpsBase > 0 ? (int)(1000.0 / macro.CpsBase) : 100;
+            targetCps = macro.CpsBase;
+
+        if (!double.IsFinite(targetCps) || targetCps <= 0)
+            targetCps = 10.0;
+
+        int clickIntervalMs = Math.Max(1, (int)Math.Round(1000.0 / targetCps));
 
         int randomMaxMs = 0;
         if (macro.Humanize && macro.CpsMin > 0 && macro.CpsMax > 0)
@@ -441,7 +456,9 @@ public sealed class MainForm : Form
 
         // CpsStep: passo de ajuste por atalho (convertido para variação de intervalo)
         // Clamp para valores razoáveis (0.1 a 10 CPS por passo).
-        double cpsStep = Math.Clamp(macro.CpsStep > 0 ? macro.CpsStep : 1.0, 0.1, 10.0);
+        double cpsStep = double.IsFinite(macro.CpsStep) && macro.CpsStep > 0
+            ? Math.Clamp(macro.CpsStep, 0.1, 10.0)
+            : 1.0;
 
         int beepHz = macro.BipHz > 0 ? Math.Clamp(macro.BipHz, 200, 1000) : 200;
 
@@ -462,6 +479,7 @@ public sealed class MainForm : Form
             ActivationMode       = "DoubleClickHold",
             DoubleClickWindowMs  = macro.Interval > 0 ? macro.Interval : 200,
             IntervalMs           = Math.Max(1, clickIntervalMs),
+            CpsBase              = targetCps,
             RandomizationEnabled = macro.Humanize,
             RandomMin            = 0,
             RandomMax            = randomMaxMs,
@@ -627,9 +645,16 @@ public sealed class MainForm : Form
     /// </summary>
     private void PostCpsUpdate(string macroKey, double newCps)
     {
+        // CpsChanged é disparado pela thread do hook de teclado ou por um timer.
+        // Não acesse WebView2 antes de retornar para a thread que o criou.
+        if (InvokeRequired)
+        {
+            if (!IsDisposed && IsHandleCreated)
+                BeginInvoke(() => PostCpsUpdate(macroKey, newCps));
+            return;
+        }
+
         if (_webView.CoreWebView2 is null) return;
-        // Usa InvokeRequired pois CpsChanged pode chegar de thread da engine
-        if (InvokeRequired) { Invoke(() => PostCpsUpdate(macroKey, newCps)); return; }
         // Formata com InvariantCulture para que o JS receba "12.7" e não "12,7"
         string cpsStr = newCps.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
         string script = $"window.ZeusCpsUpdate?.({JsonSerializer.Serialize(macroKey)}, {cpsStr});";
